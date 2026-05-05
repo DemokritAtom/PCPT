@@ -46,19 +46,25 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
 
   useEffect(() => { phaseRef.current = phase; }, [phase]);
 
-  // Once the video element enters the DOM (phase -> viewfinder), attach the pending stream
+  // Attach (or re-attach) stream whenever the viewfinder becomes active.
+  // pendingStreamRef holds a fresh stream (first open); streamRef holds the running stream
+  // (returned from analyzing back to viewfinder — video element was unmounted so we re-attach).
   useEffect(() => {
     if (phase !== 'viewfinder') return;
-    const stream = pendingStreamRef.current;
-    const video  = videoRef.current;
-    if (!stream || !video) return;
+    const video = videoRef.current;
+    if (!video) return;
+    const stream = pendingStreamRef.current ?? streamRef.current;
+    if (!stream) return;
     pendingStreamRef.current = null;
-    video.srcObject = stream;
-    video.setAttribute('autoplay', '');
-    video.setAttribute('playsinline', '');
-    video.setAttribute('webkit-playsinline', '');
-    video.playsInline = true;
-    video.muted = true;
+    // Only re-attach if the video element doesn't already have this stream
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+      video.setAttribute('autoplay', '');
+      video.setAttribute('playsinline', '');
+      video.setAttribute('webkit-playsinline', '');
+      video.playsInline = true;
+      video.muted = true;
+    }
     void (async () => {
       try {
         await waitForVideoReady(video);
@@ -162,12 +168,45 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
     }
   }
 
+  /**
+   * Convert the card guide element's screen rect → video pixel crop box.
+   * The video is displayed with objectFit:cover so we must account for scaling + offset.
+   */
+  function guideToVideoBox(
+    guideEl: HTMLElement | null,
+    vw: number, vh: number,
+  ): { boxX: number; boxY: number; boxW: number; boxH: number } {
+    if (guideEl) {
+      const gr = guideEl.getBoundingClientRect();
+      const sw = window.innerWidth  || document.documentElement.clientWidth;
+      const sh = window.innerHeight || document.documentElement.clientHeight;
+      // objectFit:cover scale: how many screen px per video px
+      const coverScale = Math.max(sw / vw, sh / vh);
+      // Top-left of video in screen coords (negative = video extends beyond screen)
+      const vOffX = (sw - vw * coverScale) / 2;
+      const vOffY = (sh - vh * coverScale) / 2;
+      const bx = Math.max(0, Math.round((gr.left   - vOffX) / coverScale));
+      const by = Math.max(0, Math.round((gr.top    - vOffY) / coverScale));
+      const bw = Math.min(vw - bx, Math.round(gr.width  / coverScale));
+      const bh = Math.min(vh - by, Math.round(gr.height / coverScale));
+      if (bw > 10 && bh > 10) return { boxX: bx, boxY: by, boxW: bw, boxH: bh };
+    }
+    // Fallback (should rarely hit): centre 64% of video width, card ratio
+    const bw = Math.round(vw * 0.64);
+    const bh = Math.round(bw / 0.71);
+    return {
+      boxX: Math.round((vw - bw) / 2),
+      boxY: Math.max(0, Math.round(vh * 0.38 - bh / 2)),
+      boxW: bw, boxH: bh,
+    };
+  }
+
   function startAutoScan() {
     if (intervalRef.current) clearInterval(intervalRef.current);
     if (detectRef.current)  clearInterval(detectRef.current);
     presenceCountRef.current = 0;
 
-    // Fast presence check every 800ms — only triggers full OCR scan when card is stable
+    // Fast presence check every 900 ms — only triggers full OCR when card is stable
     detectRef.current = setInterval(() => {
       if (phaseRef.current !== 'viewfinder' || isBusyRef.current) return;
       const video  = videoRef.current;
@@ -180,10 +219,8 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
       ctx.drawImage(video, 0, 0);
-      const boxW = Math.round(vw * 0.64);
-      const boxH = Math.round(boxW / 0.71);
-      const boxX = Math.round((vw - boxW) / 2);
-      const boxY = Math.max(0, Math.round(vh * 0.38 - boxH / 2));
+      // Use the actual guide element to get the correct crop box in video pixel space
+      const { boxX, boxY, boxW, boxH } = guideToVideoBox(cardGuideRef.current, vw, vh);
       const present = detectCardPresence(ctx, boxX, boxY, boxW, boxH);
       if (present) {
         presenceCountRef.current++;
@@ -281,7 +318,7 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
       if (!ctx) throw new Error('no ctx');
       ctx.drawImage(video, 0, 0);
 
-      // Capture guide rect BEFORE switching phase (still mounted)
+      // Capture guide rect BEFORE switching phase (while guide div is still in DOM)
       const guideRect = cardGuideRef.current?.getBoundingClientRect() ?? null;
 
       // Capture frozen frame for analysis view
@@ -293,11 +330,8 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
       setAnalysisMsg('Starte Analyse…');
       setPhase('analyzing');
 
-      // Card box in video pixels (matches the visual guide)
-      const boxW = Math.round(vw * 0.64);
-      const boxH = Math.round(boxW / 0.71);
-      const boxX = Math.round((vw - boxW) / 2);
-      const boxY = Math.max(0, Math.round(vh * 0.38 - boxH / 2));
+      // Convert guide screen rect → video pixel crop box (objectFit:cover transform)
+      const { boxX, boxY, boxW, boxH } = guideToVideoBox(cardGuideRef.current, vw, vh);
 
       function cropRegion(rx: number, ry: number, rw: number, rh: number): HTMLCanvasElement {
         const c = document.createElement('canvas');
@@ -395,8 +429,9 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
     presenceCountRef.current = 0;
     isBusyRef.current = false;
     setCardDetected(false);
+    // Clear detection interval — the viewfinder useEffect will re-attach stream + call startAutoScan
+    if (detectRef.current) { clearInterval(detectRef.current); detectRef.current = null; }
     setPhase('viewfinder');
-    startAutoScan();
   }
 
   /** Extract a plausible card name from raw OCR text */
