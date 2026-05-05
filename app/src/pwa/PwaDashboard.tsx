@@ -335,6 +335,27 @@ function ActivityRow({ icon, tone, text, time }: { icon: React.ReactNode; tone: 
 type ChartRange = '1W' | '1M' | '3M' | 'MAX';
 const CHART_RANGES: ChartRange[] = ['1W', '1M', '3M', 'MAX'];
 
+/** Simple linear forecast: last N points → linear regression → next M days */
+function linearForecast(data: number[], forecastDays = 30): number[] {
+  const n = Math.min(data.length, 30);
+  const slice = data.slice(-n);
+  if (slice.length < 2) return Array(forecastDays + 1).fill(data[data.length - 1] ?? 0);
+  const xMean = (n - 1) / 2;
+  const yMean = slice.reduce((a, b) => a + b, 0) / n;
+  let num = 0, den = 0;
+  slice.forEach((y, i) => { num += (i - xMean) * (y - yMean); den += (i - xMean) ** 2; });
+  const slope = den === 0 ? 0 : num / den;
+  const last = data[data.length - 1] ?? 0;
+  return Array.from({ length: forecastDays + 1 }, (_, i) => Math.max(0, last + slope * i));
+}
+
+/** Format date relative to today */
+function fmtDateLabel(daysAgo: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - daysAgo);
+  return `${d.getDate().toString().padStart(2,'0')}.${(d.getMonth()+1).toString().padStart(2,'0')}.${String(d.getFullYear()).slice(2)}`;
+}
+
 export interface TotalChartData {
   totalHistory: number[];
   total: number;
@@ -343,46 +364,90 @@ export interface TotalChartData {
 }
 
 export function TotalChartScreen({
-  totalHistory, total, pnl, pct, currency, t, onClose,
+  totalHistory, total, pnl, pct, currency, onClose,
 }: TotalChartData & { currency: string; t: TranslationFn; onClose: () => void }) {
   const [chartRange, setChartRange] = useState<ChartRange>('1M');
   const [hoverIdx, setHoverIdx]     = useState<number | null>(null);
-  const svgRef = useRef<SVGSVGElement>(null);
+  const [showForecast, setShowForecast] = useState(true);
+  const svgRef  = useRef<SVGSVGElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
 
   const getSlice = useCallback((r: ChartRange): number[] => {
     switch (r) {
-      case '1W':  return totalHistory.slice(-7);
-      case '1M':  return totalHistory.slice(-31);
-      default:    return totalHistory;
+      case '1W': return totalHistory.slice(-7);
+      case '1M': return totalHistory.slice(-31);
+      case '3M': return totalHistory.slice(-90);
+      default:   return totalHistory;
     }
   }, [totalHistory]);
 
-  const raw  = getSlice(chartRange);
-  const data = raw.length > 0 ? raw : [total];
-  if (data.length < 2) data.push(total);
+  const histData = useMemo(() => {
+    const raw = getSlice(chartRange);
+    const d = raw.length > 0 ? raw : [total];
+    return d.length < 2 ? [...d, total] : d;
+  }, [chartRange, getSlice, total]);
 
-  const W = 340, H = 180;
-  const minV = Math.min(...data);
-  const maxV = Math.max(...data);
+  const forecast = useMemo(() => linearForecast(histData, 30), [histData]);
+
+  const allVals = showForecast ? [...histData, ...forecast] : histData;
+  const rawMin = Math.min(...allVals);
+  const rawMax = Math.max(...allVals);
+  const pad  = (rawMax - rawMin) * 0.12 || rawMax * 0.05 || 1;
+  const minV = rawMin - pad;
+  const maxV = rawMax + pad;
   const span = maxV - minV || 1;
-  const pts: [number, number][] = data.map((v, i) => [
-    (i / (data.length - 1)) * W,
-    H - ((v - minV) / span) * (H - 8) - 4,
-  ]);
-  const pathD = pts.map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)} ${y.toFixed(1)}`).join(' ');
-  const areaD = `${pathD} L${W} ${H} L0 ${H} Z`;
 
-  const hoverVal = hoverIdx !== null ? (data[hoverIdx] ?? null) : null;
-  const hoverPt  = hoverIdx !== null ? (pts[hoverIdx] ?? null)  : null;
-  const displayVal = hoverVal ?? total;
+  // SVG coordinate space — no left padding; Y-labels are HTML
+  const W = 500, H = 220;
+  function toY(v: number) { return H - ((v - minV) / span) * (H - 8) - 4; }
+  function toX(i: number, n: number) { return (i / (n - 1)) * W; }
+
+  const histPts: [number, number][] = histData.map((v, i) => [toX(i, histData.length), toY(v)]);
+  const histPath = histPts.map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)} ${y.toFixed(1)}`).join(' ');
+  const histArea = `${histPath} L${W} ${H} L0 ${H} Z`;
+
+  const fStartX = toX(histData.length - 1, histData.length);
+  const forecastPts: [number, number][] = forecast.map((v, i) => [
+    fStartX + (i / (forecast.length - 1)) * (W - fStartX),
+    toY(v),
+  ]);
+  const forecastPath = forecastPts.map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)} ${y.toFixed(1)}`).join(' ');
+  const forecastArea = `${forecastPath} L${W} ${H} L${fStartX.toFixed(1)} ${H} Z`;
+
+  const hoverPt  = hoverIdx !== null ? (histPts[hoverIdx] ?? null) : null;
+  const hoverVal = hoverIdx !== null ? (histData[hoverIdx] ?? null) : null;
+  const daysAgo  = hoverIdx !== null ? histData.length - 1 - hoverIdx : 0;
   const up = pnl >= 0;
 
   function getIdxFromX(clientX: number): number {
     const rect = svgRef.current?.getBoundingClientRect();
-    if (!rect) return 0;
+    if (!rect) return histData.length - 1;
     const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    return Math.round(frac * (data.length - 1));
+    return Math.round(frac * (histData.length - 1));
   }
+
+  // Y-axis ticks (5 levels, top→bottom)
+  const yTicks = Array.from({ length: 5 }, (_, i) => maxV - (span * i) / 4);
+
+  // X-axis date labels — 5 evenly spaced
+  const totalDays = histData.length - 1;
+  const X_COUNT = Math.min(5, histData.length);
+  const xLabels = Array.from({ length: X_COUNT }, (_, i) => {
+    const idx = Math.round((i / (X_COUNT - 1)) * (histData.length - 1));
+    return { pct: idx / (histData.length - 1) * 100, label: fmtDateLabel(totalDays - idx) };
+  });
+
+  const forecastEnd   = forecast[forecast.length - 1] ?? total;
+  const forecastDelta = forecastEnd - total;
+  const forecastUp    = forecastDelta >= 0;
+
+  // Tooltip position (HTML overlay)
+  const tooltipLeft = hoverPt
+    ? `${Math.max(5, Math.min(85, (hoverPt[0] / W) * 100 - 8))}%`
+    : '0';
+  const tooltipTop = hoverPt
+    ? `${Math.max(4, (hoverPt[1] / H) * 100 - 14)}%`
+    : '0';
 
   return (
     <div style={{
@@ -390,68 +455,278 @@ export function TotalChartScreen({
       background: 'var(--bg)', display: 'flex', flexDirection: 'column',
       animation: 'slideUp 0.22s cubic-bezier(0.2,0.9,0.3,1)',
     }}>
-      {/* Back button bar */}
+      {/* Header */}
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 10,
-        padding: '14px 16px 0',
+        display: 'flex', alignItems: 'center', gap: 12,
+        padding: '14px 20px 12px',
         paddingTop: 'calc(14px + env(safe-area-inset-top, 0px))',
+        borderBottom: '1px solid var(--card-border)',
+        background: 'var(--bg)',
+        flexShrink: 0,
       }}>
         <button onClick={onClose} style={{
           width: 36, height: 36, borderRadius: 999, border: 'none',
           background: 'var(--pill-bg)', color: 'var(--fg)',
           display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
+          flexShrink: 0,
         }}><Icons.ChevronLeft size={18}/></button>
-        <span style={{ fontSize: 16, fontWeight: 700, color: 'var(--fg)' }}>{t('pwa.totalValue')}</span>
+        <div>
+          <div style={{ fontSize: 17, fontWeight: 800, color: 'var(--fg)', letterSpacing: -0.3 }}>
+            Portfolio-Wert
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--fg-muted)' }}>
+            Historische Entwicklung &amp; Prognose
+          </div>
+        </div>
       </div>
 
-      {/* Chart body — scrollable */}
-      <div style={{ flex: 1, overflow: 'auto', padding: '16px 20px 24px' }}>
-          <div style={{ textAlign: 'center', marginBottom: 8 }}>
-            <div style={{ fontSize: 34, fontWeight: 800, color: 'var(--fg)', letterSpacing: -0.8 }}>
-              {fmtMoney(displayVal, currency)}
+      {/* Scrollable body */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '18px 16px 32px' }}>
+
+        {/* Big value */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 40, fontWeight: 900, color: 'var(--fg)', letterSpacing: -1, lineHeight: 1 }}>
+            {fmtMoney(hoverVal ?? total, currency)}
+          </div>
+          {hoverIdx !== null ? (
+            <div style={{ fontSize: 13, color: 'var(--fg-muted)', marginTop: 5, fontWeight: 600 }}>
+              {daysAgo === 0 ? 'Heute' : `${fmtDateLabel(daysAgo)} (vor ${daysAgo} Tag${daysAgo === 1 ? '' : 'en'})`}
             </div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: up ? 'var(--up)' : 'var(--down)', marginTop: 2 }}>
-              {fmtMoneySigned(pnl, currency)} ({fmtPct(pct)}) {t('pwa.allTime')}
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                padding: '4px 10px', borderRadius: 999, fontSize: 13, fontWeight: 700,
+                background: up ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)',
+                color: up ? 'var(--up)' : 'var(--down)',
+              }}>
+                {up ? <Icons.ArrowUp size={13} stroke={2.5}/> : <Icons.ArrowDown size={13} stroke={2.5}/>}
+                {fmtMoneySigned(pnl, currency)} ({fmtPct(pct)})
+              </span>
+              <span style={{ fontSize: 12, color: 'var(--fg-muted)' }}>Gesamt (all-time)</span>
+            </div>
+          )}
+        </div>
+
+        {/* Range + forecast toggle */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
+          {CHART_RANGES.map(r => (
+            <button key={r} onClick={() => { setChartRange(r); setHoverIdx(null); }} style={{
+              padding: '7px 16px', borderRadius: 10, fontSize: 13, fontWeight: 700,
+              background: chartRange === r ? 'var(--accent-grad)' : 'var(--pill-bg)',
+              color: chartRange === r ? 'white' : 'var(--fg-muted)',
+              border: 'none', cursor: 'pointer',
+              boxShadow: chartRange === r ? '0 4px 12px var(--accent-shadow)' : 'none',
+            }}>{r}</button>
+          ))}
+          <div style={{ flex: 1 }}/>
+          <button onClick={() => setShowForecast(f => !f)} style={{
+            padding: '7px 12px', borderRadius: 10, fontSize: 12, fontWeight: 700,
+            background: showForecast ? 'rgba(251,146,60,0.18)' : 'var(--pill-bg)',
+            color: showForecast ? '#FB923C' : 'var(--fg-muted)',
+            border: showForecast ? '1px solid rgba(251,146,60,0.4)' : '1px solid var(--card-border)',
+            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5,
+          }}>
+            <Icons.TrendingUp size={13}/>
+            Prognose
+          </button>
+        </div>
+
+        {/* Main chart card */}
+        <div style={{
+          background: 'var(--card-bg)', borderRadius: 20,
+          border: '1px solid var(--card-border)',
+          padding: '14px 12px 6px',
+          boxShadow: '0 4px 24px rgba(0,0,0,0.12)',
+          marginBottom: 14,
+        }}>
+          {/* Chart body: Y-labels + SVG side by side */}
+          <div style={{ display: 'flex', gap: 0, alignItems: 'stretch' }}>
+
+            {/* Y-axis labels column (HTML — never distorted) */}
+            <div style={{
+              width: 56, flexShrink: 0, display: 'flex', flexDirection: 'column',
+              justifyContent: 'space-between', paddingBottom: 2,
+            }}>
+              {yTicks.map((v, i) => (
+                <div key={i} style={{
+                  fontSize: 10, fontWeight: 600,
+                  color: 'var(--fg-muted)', textAlign: 'right', paddingRight: 8,
+                  lineHeight: 1,
+                }}>
+                  {fmtMoney(v, currency).replace(/\s/g, '')}
+                </div>
+              ))}
+            </div>
+
+            {/* SVG — only paths + grid lines + hover dot, NO text */}
+            <div ref={wrapRef} style={{ flex: 1, position: 'relative' }}>
+              <svg
+                ref={svgRef}
+                viewBox={`0 0 ${W} ${H}`}
+                preserveAspectRatio="none"
+                style={{ width: '100%', height: 220, display: 'block', touchAction: 'none', cursor: 'crosshair' }}
+                onMouseMove={(e) => setHoverIdx(getIdxFromX(e.clientX))}
+                onMouseLeave={() => setHoverIdx(null)}
+                onTouchMove={(e) => { e.preventDefault(); const t0 = e.touches[0]; if (t0) setHoverIdx(getIdxFromX(t0.clientX)); }}
+                onTouchEnd={() => setHoverIdx(null)}
+              >
+                <defs>
+                  <linearGradient id="hist-fill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="var(--accent-solid)" stopOpacity="0.38"/>
+                    <stop offset="100%" stopColor="var(--accent-solid)" stopOpacity="0.02"/>
+                  </linearGradient>
+                  <linearGradient id="fore-fill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#FB923C" stopOpacity="0.22"/>
+                    <stop offset="100%" stopColor="#FB923C" stopOpacity="0.02"/>
+                  </linearGradient>
+                </defs>
+
+                {/* Horizontal grid lines at Y-ticks */}
+                {yTicks.map((v, i) => (
+                  <line key={i} x1={0} y1={toY(v)} x2={W} y2={toY(v)}
+                    stroke="var(--card-border)" strokeWidth="1"
+                    strokeDasharray={i === yTicks.length - 1 ? '0' : '4 3'}/>
+                ))}
+
+                {/* Forecast */}
+                {showForecast && <>
+                  <path d={forecastArea} fill="url(#fore-fill)"/>
+                  <path d={forecastPath} fill="none" stroke="#FB923C" strokeWidth="2"
+                    strokeDasharray="6 4" strokeLinecap="round" strokeLinejoin="round" opacity="0.85"/>
+                </>}
+
+                {/* "Heute" divider */}
+                {showForecast && (
+                  <line x1={fStartX} y1={0} x2={fStartX} y2={H}
+                    stroke="var(--fg-muted)" strokeWidth="1.5" strokeDasharray="3 3" opacity="0.45"/>
+                )}
+
+                {/* History */}
+                <path d={histArea} fill="url(#hist-fill)"/>
+                <path d={histPath} fill="none" stroke="var(--accent-solid)" strokeWidth="2.5"
+                  strokeLinecap="round" strokeLinejoin="round"/>
+
+                {/* Hover crosshair + dot */}
+                {hoverPt && <>
+                  <line x1={hoverPt[0]} y1={0} x2={hoverPt[0]} y2={H}
+                    stroke="var(--accent-solid)" strokeWidth="1" strokeDasharray="4 3" opacity="0.55"/>
+                  <circle cx={hoverPt[0]} cy={hoverPt[1]} r="5.5" fill="var(--accent-solid)" stroke="var(--bg)" strokeWidth="2.5"/>
+                </>}
+              </svg>
+
+              {/* Hover tooltip — HTML overlay (no SVG text distortion) */}
+              {hoverPt && hoverVal !== null && (
+                <div style={{
+                  position: 'absolute', top: tooltipTop, left: tooltipLeft,
+                  background: 'var(--card-bg)', border: '1px solid var(--card-border)',
+                  borderRadius: 10, padding: '5px 10px',
+                  fontSize: 12, fontWeight: 700, color: 'var(--fg)',
+                  boxShadow: '0 4px 14px rgba(0,0,0,0.18)',
+                  pointerEvents: 'none', whiteSpace: 'nowrap',
+                }}>
+                  {fmtMoney(hoverVal, currency)}
+                </div>
+              )}
+
+              {/* "Heute" label */}
+              {showForecast && (
+                <div style={{
+                  position: 'absolute', top: 6, fontSize: 10, fontWeight: 700,
+                  color: 'var(--fg-muted)', pointerEvents: 'none',
+                  left: `${(fStartX / W) * 100 + 0.5}%`,
+                }}>
+                  Heute
+                </div>
+              )}
             </div>
           </div>
 
-          <svg
-            ref={svgRef}
-            viewBox={`0 0 ${W} ${H}`}
-            style={{ width: '100%', height: 180, overflow: 'visible', display: 'block', touchAction: 'none', cursor: 'crosshair' }}
-            onMouseMove={(e) => setHoverIdx(getIdxFromX(e.clientX))}
-            onMouseLeave={() => setHoverIdx(null)}
-            onTouchMove={(e) => { e.preventDefault(); const t0 = e.touches[0]; if (t0) setHoverIdx(getIdxFromX(t0.clientX)); }}
-            onTouchEnd={() => setHoverIdx(null)}
-          >
-            <defs>
-              <linearGradient id="tcg" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0" stopColor="var(--accent-solid)" stopOpacity="0.35"/>
-                <stop offset="1" stopColor="var(--accent-solid)" stopOpacity="0"/>
-              </linearGradient>
-            </defs>
-            <path d={areaD} fill="url(#tcg)"/>
-            <path d={pathD} fill="none" stroke="var(--accent-solid)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-            {hoverPt && (
-              <>
-                <line x1={hoverPt[0]} y1={0} x2={hoverPt[0]} y2={H} stroke="var(--fg-muted)" strokeWidth="1" strokeDasharray="4 3" opacity="0.5"/>
-                <circle cx={hoverPt[0]} cy={hoverPt[1]} r="5" fill="var(--accent-solid)" stroke="var(--bg)" strokeWidth="2.5"/>
-              </>
-            )}
-          </svg>
-
-          <div style={{ display: 'flex', gap: 6, marginTop: 14, justifyContent: 'center' }}>
-            {CHART_RANGES.map(r => (
-              <button key={r} onClick={() => { setChartRange(r); setHoverIdx(null); }} style={{
-                padding: '7px 16px', borderRadius: 10, fontSize: 13, fontWeight: 700,
-                background: chartRange === r ? 'var(--accent-grad)' : 'var(--pill-bg)',
-                color: chartRange === r ? 'white' : 'var(--fg-muted)',
-                border: 'none', cursor: 'pointer',
-                boxShadow: chartRange === r ? '0 4px 12px var(--accent-shadow)' : 'none',
-              }}>{r}</button>
+          {/* X-axis date labels (HTML — always crisp) */}
+          <div style={{
+            display: 'flex', justifyContent: 'space-between',
+            paddingLeft: 56, paddingTop: 8, paddingBottom: 4,
+          }}>
+            {xLabels.map(({ label }, i) => (
+              <div key={i} style={{
+                fontSize: 10, fontWeight: 600, color: 'var(--fg-muted)',
+                textAlign: i === 0 ? 'left' : i === xLabels.length - 1 ? 'right' : 'center',
+                flex: 1,
+              }}>
+                {label}
+              </div>
             ))}
           </div>
+
+          {/* Forecast date label */}
+          {showForecast && (
+            <div style={{ paddingLeft: 56, paddingBottom: 4 }}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', fontSize: 10, color: '#FB923C', fontWeight: 600 }}>
+                +30 Tage: {fmtDateLabel(-30)}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Stats row */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 14 }}>
+          {[
+            { label: 'Min', value: fmtMoney(Math.min(...histData), currency) },
+            { label: 'Max', value: fmtMoney(Math.max(...histData), currency) },
+            { label: 'Ø Ø-Wert', value: fmtMoney(histData.reduce((a, b) => a + b, 0) / histData.length, currency) },
+          ].map(({ label, value }) => (
+            <div key={label} style={{
+              background: 'var(--card-bg)', borderRadius: 14, padding: '12px 12px',
+              border: '1px solid var(--card-border)', textAlign: 'center',
+            }}>
+              <div style={{ fontSize: 10, color: 'var(--fg-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.3 }}>
+                {label}
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--fg)', marginTop: 3 }}>
+                {value}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Forecast explanation card */}
+        {showForecast && (
+          <div style={{
+            background: 'var(--card-bg)', borderRadius: 18, padding: '16px 16px',
+            border: '1px solid rgba(251,146,60,0.3)',
+            boxShadow: '0 4px 16px rgba(251,146,60,0.08)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <div style={{
+                width: 30, height: 30, borderRadius: 10,
+                background: 'rgba(251,146,60,0.18)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+              }}>
+                <Icons.TrendingUp size={15} style={{ color: '#FB923C' }}/>
+              </div>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--fg)' }}>30-Tage Prognose</div>
+                <div style={{ fontSize: 11, color: 'var(--fg-muted)' }}>
+                  Lineare Trendfortschreibung · nicht verbindlich
+                </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+              <div style={{ fontSize: 26, fontWeight: 800, color: '#FB923C', letterSpacing: -0.5 }}>
+                {fmtMoney(forecastEnd, currency)}
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: forecastUp ? 'var(--up)' : 'var(--down)' }}>
+                {forecastUp ? '+' : ''}{fmtMoney(forecastDelta, currency)}{' '}
+                ({forecastUp ? '+' : ''}{((forecastDelta / (total || 1)) * 100).toFixed(1)}%)
+              </div>
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--fg-muted)', marginTop: 8, lineHeight: 1.5 }}>
+              Basiert auf dem linearen Trend der letzten 30 Tage. Keine Anlageberatung.
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
 }
+

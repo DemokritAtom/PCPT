@@ -1,4 +1,4 @@
-﻿// PWA Scan screen - live camera feed with auto-detect (no shutter button needed)
+﻿// PWA Scan screen - document-scanner style card detection
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Icons } from './icons';
@@ -8,7 +8,8 @@ import { searchCardsApi } from '@/lib/pokemon-api';
 import type { TranslationFn } from './types';
 import type { Card } from '@/lib/types';
 
-type Phase = 'permission' | 'viewfinder' | 'matching' | 'review';
+type Phase = 'permission' | 'viewfinder' | 'analyzing' | 'review';
+type RoiStatus = 'pending' | 'active' | 'ok' | 'fail';
 
 interface ScanProps {
   cards: Card[];
@@ -24,16 +25,24 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
   const [detectedName, setDetectedName] = useState('');
   const [error, setError]             = useState<string | null>(null);
   const [scanCount, setScanCount]     = useState(0);
+  const [capturedFrame, setCapturedFrame] = useState<string | null>(null);
+  const [cardGuideRect, setCardGuideRect] = useState<DOMRect | null>(null);
+  const [roiStatuses, setRoiStatuses] = useState<Record<string, RoiStatus>>({});
+  const [analysisMsg, setAnalysisMsg] = useState('');
+  const [cardDetected, setCardDetected] = useState(false);
 
   const videoRef       = useRef<HTMLVideoElement>(null);
   const streamRef      = useRef<MediaStream | null>(null);
   const canvasRef      = useRef<HTMLCanvasElement>(null);
   const phaseRef       = useRef<Phase>('permission');
   const intervalRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const detectRef      = useRef<ReturnType<typeof setInterval> | null>(null);
   const pendingStreamRef = useRef<MediaStream | null>(null);
+  const cardGuideRef   = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const workerRef      = useRef<any>(null);
   const isBusyRef      = useRef(false);
+  const presenceCountRef = useRef(0);
 
   useEffect(() => { phaseRef.current = phase; }, [phase]);
 
@@ -93,6 +102,7 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
 
   const stopCamera = useCallback(() => {
     if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+    if (detectRef.current)  { clearInterval(detectRef.current);  detectRef.current  = null; }
     streamRef.current?.getTracks().forEach(tr => tr.stop());
     streamRef.current = null;
   }, []);
@@ -154,9 +164,62 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
 
   function startAutoScan() {
     if (intervalRef.current) clearInterval(intervalRef.current);
-    intervalRef.current = setInterval(() => {
-      if (phaseRef.current === 'viewfinder') void runScan();
-    }, 3500);
+    if (detectRef.current)  clearInterval(detectRef.current);
+    presenceCountRef.current = 0;
+
+    // Fast presence check every 800ms — only triggers full OCR scan when card is stable
+    detectRef.current = setInterval(() => {
+      if (phaseRef.current !== 'viewfinder' || isBusyRef.current) return;
+      const video  = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas || video.videoWidth === 0) return;
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      canvas.width  = vw;
+      canvas.height = vh;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0);
+      const boxW = Math.round(vw * 0.64);
+      const boxH = Math.round(boxW / 0.71);
+      const boxX = Math.round((vw - boxW) / 2);
+      const boxY = Math.max(0, Math.round(vh * 0.38 - boxH / 2));
+      const present = detectCardPresence(ctx, boxX, boxY, boxW, boxH);
+      if (present) {
+        presenceCountRef.current++;
+        setCardDetected(true);
+        if (presenceCountRef.current >= 2) {
+          presenceCountRef.current = 0;
+          void runScan();
+        }
+      } else {
+        presenceCountRef.current = 0;
+        setCardDetected(false);
+      }
+    }, 900);
+  }
+
+  // ── Card presence detection (pixel variance in center of card box) ──────────
+  function detectCardPresence(
+    ctx: CanvasRenderingContext2D,
+    boxX: number, boxY: number, boxW: number, boxH: number
+  ): boolean {
+    const sw = Math.max(1, Math.round(boxW * 0.5));
+    const sh = Math.max(1, Math.round(boxH * 0.35));
+    const sx = Math.round(boxX + boxW * 0.25);
+    const sy = Math.round(boxY + boxH * 0.3);
+    try {
+      const { data } = ctx.getImageData(sx, sy, sw, sh);
+      let sum = 0, sumSq = 0;
+      const n = data.length / 4;
+      for (let i = 0; i < data.length; i += 4) {
+        const gray = (data[i]! + data[i + 1]! + data[i + 2]!) / 3;
+        sum += gray; sumSq += gray * gray;
+      }
+      const mean = sum / n;
+      const variance = sumSq / n - mean * mean;
+      return variance > 350; // blank wall ~< 100, card > 400
+    } catch { return false; }
   }
 
   // ── Image preprocessing (scale 4x + grayscale + contrast) ──────────────────
@@ -204,8 +267,7 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
   async function runScan() {
     if (phaseRef.current !== 'viewfinder' || isBusyRef.current) return;
     isBusyRef.current = true;
-    setPhase('matching');
-    setScanCount(c => c + 1);
+
     try {
       const video  = videoRef.current;
       const canvas = canvasRef.current;
@@ -215,9 +277,23 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
       const vh = video.videoHeight || 480;
       canvas.width  = vw;
       canvas.height = vh;
-      canvas.getContext('2d')?.drawImage(video, 0, 0);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('no ctx');
+      ctx.drawImage(video, 0, 0);
 
-      // Match the ScanTarget visual overlay (width=64%, centered, top at 38%-halfH)
+      // Capture guide rect BEFORE switching phase (still mounted)
+      const guideRect = cardGuideRef.current?.getBoundingClientRect() ?? null;
+
+      // Capture frozen frame for analysis view
+      const frameUrl = canvas.toDataURL('image/jpeg', 0.88);
+      setCapturedFrame(frameUrl);
+      setCardGuideRect(guideRect);
+      setScanCount(c => c + 1);
+      setRoiStatuses({ number: 'pending', name: 'pending' });
+      setAnalysisMsg('Starte Analyse…');
+      setPhase('analyzing');
+
+      // Card box in video pixels (matches the visual guide)
       const boxW = Math.round(vw * 0.64);
       const boxH = Math.round(boxW / 0.71);
       const boxX = Math.round((vw - boxW) / 2);
@@ -231,57 +307,82 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
         return c;
       }
 
-      // Region A: card name — top 22% of card box (where name text appears)
-      const nameRoi = preprocessForOcr(cropRegion(boxX, boxY, boxW, boxH * 0.22));
-
-      // Region B: card number — bottom 15%, right 55% (where "NNN/NNN" is printed)
-      const numW = boxW * 0.55;
-      const numH = boxH * 0.15;
-      const numRoi = preprocessForOcr(cropRegion(boxX + boxW - numW, boxY + boxH - numH, numW, numH));
-
       const worker = await getWorker();
-
-      // OCR name region (psm=7: single line of text)
-      await worker.setParameters({ tessedit_pageseg_mode: '7' });
-      const nameResult = await worker.recognize(nameRoi);
-      const nameText: string = nameResult.data.text;
-
-      // OCR number region (digits + slash)
-      await worker.setParameters({ tessedit_pageseg_mode: '7', tessedit_char_whitelist: '0123456789/\\|ABCDEFGHIJKLMNOPQRSTUVWXYZ- ' });
-      const numResult = await worker.recognize(numRoi);
-      const numText: string = numResult.data.text;
-      // Reset whitelist
-      await worker.setParameters({ tessedit_char_whitelist: '' });
-
       let results: Card[] = [];
       let searchTerm = '';
 
-      // Strategy 1: card number (most reliable — fixed format on every card)
+      // ── Strategy 1: card number OCR (bottom-right corner, most reliable) ──
+      setRoiStatuses(s => ({ ...s, number: 'active' }));
+      setAnalysisMsg('Suche Kartennummer…');
+      const numW = boxW * 0.55;
+      const numH = boxH * 0.15;
+      const numRoi = preprocessForOcr(
+        cropRegion(boxX + boxW - numW, boxY + boxH - numH, numW, numH)
+      );
+      await worker.setParameters({
+        tessedit_pageseg_mode: '7',
+        tessedit_char_whitelist: '0123456789/\\|ABCDEFGHIJKLMNOPQRSTUVWXYZ- ',
+      });
+      const numResult = await worker.recognize(numRoi);
+      await worker.setParameters({ tessedit_char_whitelist: '' });
+      const numText: string = numResult.data.text;
       const cardNum = parseCardNumber(numText);
+
       if (cardNum) {
         const r = await searchCardsApi(cardNum, 12);
-        if (r.cards.length > 0) { results = r.cards; searchTerm = cardNum; }
+        if (r.cards.length > 0) {
+          results = r.cards;
+          searchTerm = cardNum;
+          setRoiStatuses(s => ({ ...s, number: 'ok' }));
+        } else {
+          setRoiStatuses(s => ({ ...s, number: 'fail' }));
+        }
+      } else {
+        setRoiStatuses(s => ({ ...s, number: 'fail' }));
       }
 
-      // Strategy 2: card name OCR (fallback)
+      // ── Strategy 2: card name OCR (top of card, fallback) ──────────────────
       if (results.length === 0) {
+        setRoiStatuses(s => ({ ...s, name: 'active' }));
+        setAnalysisMsg('Suche Kartenname…');
+        const nameRoi = preprocessForOcr(
+          cropRegion(boxX, boxY, boxW, boxH * 0.22)
+        );
+        await worker.setParameters({ tessedit_pageseg_mode: '7' });
+        const nameResult = await worker.recognize(nameRoi);
+        const nameText: string = nameResult.data.text;
         const name = extractNameFromOcr(nameText);
         if (name && name.length >= 3) {
           const r = await searchCardsApi(name, 12);
-          if (r.cards.length > 0) { results = r.cards; searchTerm = name; }
+          if (r.cards.length > 0) {
+            results = r.cards;
+            searchTerm = name;
+            setRoiStatuses(s => ({ ...s, name: 'ok' }));
+          } else {
+            setRoiStatuses(s => ({ ...s, name: 'fail' }));
+          }
+        } else {
+          setRoiStatuses(s => ({ ...s, name: 'fail' }));
         }
       }
 
       isBusyRef.current = false;
 
-      if (results.length === 0) { setPhase('viewfinder'); return; }
+      if (results.length === 0) {
+        setAnalysisMsg('Nichts gefunden – nochmal versuchen');
+        await new Promise(r => setTimeout(r, 900));
+        presenceCountRef.current = 0;
+        setCardDetected(false);
+        setPhase('viewfinder');
+        return;
+      }
 
-      if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
       setDetectedName(searchTerm);
       setSearchResults(results);
       setPhase('review');
     } catch {
       isBusyRef.current = false;
+      presenceCountRef.current = 0;
       setPhase('viewfinder');
     }
   }
@@ -289,6 +390,11 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
   function retry() {
     setSearchResults([]);
     setDetectedName('');
+    setCapturedFrame(null);
+    setCardGuideRect(null);
+    presenceCountRef.current = 0;
+    isBusyRef.current = false;
+    setCardDetected(false);
     setPhase('viewfinder');
     startAutoScan();
   }
@@ -309,7 +415,7 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
     return null;
   }
 
-  // â”€â”€ PERMISSION GATE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─── PERMISSION GATE ──────────────────────────────────────────────────────
 
   if (phase === 'permission') {
     return (
@@ -329,7 +435,7 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
             {t('pwa.cameraPermBody')}
           </div>
           <div style={{ fontSize: 12, color: 'var(--accent-solid)', marginTop: 10, fontWeight: 600 }}>
-            Wird automatisch erkannt – kein Knopf nötig
+            Karte in Rahmen halten – wird automatisch erkannt
           </div>
           {error && (
             <div style={{ marginTop: 16, padding: '10px 14px', borderRadius: 10, background: 'rgba(239,68,68,0.12)', color: 'var(--down)', fontSize: 12 }}>
@@ -350,7 +456,128 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
     );
   }
 
-  // â”€â”€ REVIEW â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─── ANALYZING ────────────────────────────────────────────────────────────────
+
+  if (phase === 'analyzing' && capturedFrame) {
+    const gr = cardGuideRect;
+    // ROI boxes positioned in screen-pixel coords from the stored guideRect
+    const roiDefs: { id: string; label: string; style: React.CSSProperties }[] = gr ? [
+      {
+        id: 'number',
+        label: 'Kartennummer',
+        style: {
+          left: gr.left + gr.width * 0.45,
+          top:  gr.top  + gr.height * 0.84,
+          width: gr.width * 0.55,
+          height: gr.height * 0.16,
+        },
+      },
+      {
+        id: 'name',
+        label: 'Kartenname',
+        style: {
+          left: gr.left,
+          top:  gr.top,
+          width: gr.width,
+          height: gr.height * 0.23,
+        },
+      },
+    ] : [];
+
+    return (
+      <div style={{ height: '100%', position: 'relative', overflow: 'hidden', background: '#000' }}>
+        {/* Frozen frame */}
+        <img
+          src={capturedFrame}
+          alt=""
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }}
+        />
+        {/* Dark overlay */}
+        <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.42)', zIndex: 1 }}/>
+
+        {/* ROI highlight boxes */}
+        {roiDefs.map(({ id, label, style }) => {
+          const st = roiStatuses[id] ?? 'pending';
+          const color = st === 'active' ? '#60a5fa'
+            : st === 'ok'   ? '#22c55e'
+            : st === 'fail' ? '#ef4444'
+            : 'rgba(255,255,255,0.22)';
+          const glow = st === 'active' ? `0 0 20px ${color}66, 0 0 6px ${color}` : 'none';
+          return (
+            <div key={id} style={{
+              position: 'absolute', zIndex: 3,
+              left: style.left as number, top: style.top as number,
+              width: style.width as number, height: style.height as number,
+              border: `2px solid ${color}`,
+              borderRadius: 7,
+              boxShadow: glow,
+              transition: 'border-color 0.25s, box-shadow 0.25s',
+            }}>
+              {/* Label badge above the box */}
+              <div style={{
+                position: 'absolute', bottom: '100%', left: 0, marginBottom: 5,
+                background: color, color: '#000',
+                fontSize: 10, fontWeight: 800,
+                padding: '2px 8px', borderRadius: 5, whiteSpace: 'nowrap',
+                opacity: st === 'pending' ? 0.45 : 1,
+                transition: 'opacity 0.2s, background 0.25s',
+              }}>
+                {st === 'active' ? '⏳ ' : st === 'ok' ? '✓ ' : st === 'fail' ? '✗ ' : ''}{label}
+              </div>
+              {/* Active pulse fill */}
+              {st === 'active' && (
+                <div style={{
+                  position: 'absolute', inset: 0,
+                  background: `${color}22`,
+                  borderRadius: 5,
+                  animation: 'pulse-bg 1s ease-in-out infinite',
+                }}/>
+              )}
+            </div>
+          );
+        })}
+
+        {/* Status pill */}
+        <div style={{
+          position: 'absolute', bottom: 88, left: 0, right: 0, zIndex: 5,
+          display: 'flex', justifyContent: 'center',
+        }}>
+          <div style={{
+            padding: '10px 20px', borderRadius: 999,
+            background: 'rgba(0,0,0,0.72)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)',
+            fontSize: 13, fontWeight: 700, color: 'white',
+            border: '1px solid rgba(255,255,255,0.14)',
+            display: 'inline-flex', alignItems: 'center', gap: 9,
+          }}>
+            <span style={{
+              width: 8, height: 8, borderRadius: 999,
+              background: 'var(--accent-solid)',
+              boxShadow: '0 0 8px var(--accent-solid)',
+              display: 'inline-block',
+              flexShrink: 0,
+            }} className="pulse-dot"/>
+            {analysisMsg}
+          </div>
+        </div>
+
+        {/* Cancel button */}
+        <button
+          onClick={retry}
+          style={{
+            position: 'absolute', bottom: 30, left: '50%', transform: 'translateX(-50%)', zIndex: 5,
+            padding: '10px 24px', borderRadius: 999,
+            background: 'rgba(255,255,255,0.14)', backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)',
+            border: '1px solid rgba(255,255,255,0.2)',
+            color: 'white', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+          }}
+        >
+          Abbrechen
+        </button>
+      </div>
+    );
+  }
+
+  // ─── REVIEW ───────────────────────────────────────────────────────────────────
 
   if (phase === 'review') {
     return (
@@ -427,13 +654,12 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
       </div>
     );
   }
-  // â”€â”€ CAMERA VIEWFINDER â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-  const isScanning = phase === 'matching';
+  // ─── CAMERA VIEWFINDER ────────────────────────────────────────────────────────
 
   return (
     <div style={{ height: '100%', position: 'relative', overflow: 'hidden', background: '#000' }}>
-      {/* Live camera feed â€” autoPlay + playsInline for iOS */}
+      {/* Live camera feed */}
       <video
         ref={videoRef}
         autoPlay
@@ -443,52 +669,77 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
       />
       <canvas ref={canvasRef} style={{ display: 'none' }}/>
 
-      {/* Top gradient */}
-      <div style={{
-        position: 'absolute', top: 0, left: 0, right: 0, height: 120,
-        background: 'linear-gradient(to bottom, rgba(0,0,0,0.65), transparent)',
-        pointerEvents: 'none', zIndex: 2,
-      }}/>
+      {/* Document-scanner spotlight: huge box-shadow darkens everything outside the card guide */}
+      <div
+        ref={cardGuideRef}
+        style={{
+          position: 'absolute', left: '50%', top: '38%',
+          transform: 'translate(-50%, -50%)',
+          width: '72%',
+          aspectRatio: '0.71 / 1',
+          zIndex: 3, pointerEvents: 'none',
+          borderRadius: 16,
+          boxShadow: cardDetected
+            ? '0 0 0 9999px rgba(0,0,0,0.68), 0 0 0 3px #22c55e, 0 0 28px 4px rgba(34,197,94,0.55)'
+            : '0 0 0 9999px rgba(0,0,0,0.68), 0 0 0 2px rgba(255,255,255,0.72)',
+          transition: 'box-shadow 0.25s',
+        }}
+      >
+        {/* Corner brackets */}
+        <ScanCorner pos="tl" active={cardDetected}/>
+        <ScanCorner pos="tr" active={cardDetected}/>
+        <ScanCorner pos="bl" active={cardDetected}/>
+        <ScanCorner pos="br" active={cardDetected}/>
+
+        {/* Scanline when card detected */}
+        {cardDetected && (
+          <div className="scanline" style={{
+            position: 'absolute', left: 8, right: 8, top: 6, height: 2, borderRadius: 999,
+            background: 'linear-gradient(to right, transparent, #22c55e, transparent)',
+            boxShadow: '0 0 14px #22c55e',
+          }}/>
+        )}
+
+        {/* Hint text */}
+        <div style={{
+          position: 'absolute', bottom: -38, left: 0, right: 0,
+          textAlign: 'center', fontSize: 12, fontWeight: 700,
+          color: cardDetected ? '#22c55e' : 'rgba(255,255,255,0.72)',
+          transition: 'color 0.25s',
+        }}>
+          {cardDetected ? 'Karte erkannt – analysiere…' : 'Karte hier positionieren'}
+        </div>
+      </div>
 
       {/* Status pill */}
-      <div style={{ position: 'absolute', top: 22, left: 0, right: 0, display: 'flex', justifyContent: 'center', zIndex: 3 }}>
+      <div style={{ position: 'absolute', top: 18, left: 0, right: 0, display: 'flex', justifyContent: 'center', zIndex: 10 }}>
         <div style={{
-          padding: '8px 16px', borderRadius: 999,
-          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)',
+          padding: '7px 15px', borderRadius: 999,
+          background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)',
           fontSize: 12, fontWeight: 600, color: 'white',
           border: '1px solid rgba(255,255,255,0.12)',
           display: 'inline-flex', alignItems: 'center', gap: 7,
         }}>
           <span key={scanCount} style={{
-            width: 7, height: 7, borderRadius: 999,
-            background: isScanning ? 'var(--accent-solid)' : '#22c55e',
-            boxShadow: isScanning ? '0 0 8px var(--accent-solid)' : '0 0 6px #22c55e',
-          }} className={isScanning ? 'pulse-dot' : ''}/>
-          {isScanning ? 'OCR läuft – bitte warten…' : 'Karte in Rahmen halten · auto oder "Jetzt scannen"'}
+            width: 7, height: 7, borderRadius: 999, display: 'inline-block', flexShrink: 0,
+            background: cardDetected ? '#22c55e' : 'rgba(255,255,255,0.45)',
+            boxShadow: cardDetected ? '0 0 7px #22c55e' : 'none',
+            transition: 'background 0.25s, box-shadow 0.25s',
+          }} className={cardDetected ? 'pulse-dot' : ''}/>
+          {cardDetected ? 'Karte erkannt' : 'Warte auf Karte…'}
         </div>
       </div>
 
-      {/* Scan target */}
-      <ScanTarget matching={isScanning}/>
-
-      {/* Bottom gradient */}
+      {/* Bottom buttons */}
       <div style={{
-        position: 'absolute', bottom: 0, left: 0, right: 0, height: 180,
-        background: 'linear-gradient(to top, rgba(0,0,0,0.78), transparent)',
-        pointerEvents: 'none', zIndex: 2,
-      }}/>
-
-      {/* Manual search button */}
-      <div style={{
-        position: 'absolute', bottom: 90, left: 0, right: 0, zIndex: 5,
+        position: 'absolute', bottom: 60, left: 0, right: 0, zIndex: 5,
         display: 'flex', justifyContent: 'center', gap: 10,
       }}>
         <button
           onClick={() => { if (!isBusyRef.current) void runScan(); }}
           style={{
-            padding: '12px 28px', borderRadius: 999,
-            background: 'var(--accent-grad)',
-            border: 'none',
+            padding: '12px 26px', borderRadius: 999,
+            background: 'var(--accent-grad)', border: 'none',
             color: 'white', fontSize: 13, fontWeight: 700, cursor: 'pointer',
             display: 'flex', alignItems: 'center', gap: 7,
             boxShadow: '0 6px 20px var(--accent-shadow)',
@@ -497,7 +748,7 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
           Jetzt scannen
         </button>
         <button onClick={onManual} style={{
-          padding: '12px 20px', borderRadius: 999,
+          padding: '12px 18px', borderRadius: 999,
           background: 'rgba(255,255,255,0.14)', backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)',
           border: '1px solid rgba(255,255,255,0.18)',
           color: 'white', fontSize: 13, fontWeight: 600, cursor: 'pointer',
@@ -507,61 +758,25 @@ export function PwaScan({ currency, t, onCardDetected, onManual }: ScanProps) {
           Manuell
         </button>
       </div>
-
-      {/* Scan progress dots */}
-      <div style={{
-        position: 'absolute', bottom: 48, left: 0, right: 0, zIndex: 5,
-        display: 'flex', justifyContent: 'center', gap: 5,
-      }}>
-        {[0, 1, 2].map(i => (
-          <div key={i} style={{
-            width: 5, height: 5, borderRadius: 999,
-            background: isScanning && (scanCount % 3) === i ? 'white' : 'rgba(255,255,255,0.3)',
-            transition: 'background 0.3s',
-          }}/>
-        ))}
-      </div>
     </div>
   );
 }
 
-// â”€â”€ Sub-components â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Sub-components ────────────────────────────────────────────────────────────
 
-function ScanTarget({ matching }: { matching: boolean }) {
-  return (
-    <div style={{
-      position: 'absolute', left: '50%', top: '38%',
-      transform: 'translate(-50%, -50%)',
-      width: '64%', aspectRatio: '0.71 / 1', zIndex: 3, pointerEvents: 'none',
-    }}>
-      <div style={{
-        position: 'absolute', inset: 0, borderRadius: 14,
-        border: matching ? '2px solid var(--accent-solid)' : '2px solid rgba(255,255,255,0.5)',
-        boxShadow: matching ? '0 0 24px var(--accent-shadow)' : 'none',
-        transition: 'all 0.3s',
-      }}/>
-      <Corner pos="tl"/><Corner pos="tr"/><Corner pos="bl"/><Corner pos="br"/>
-      {matching && (
-        <div className="scanline" style={{
-          position: 'absolute', left: 6, right: 6, top: 6, height: 2, borderRadius: 999,
-          background: 'linear-gradient(to right, transparent, var(--accent-solid), transparent)',
-          boxShadow: '0 0 14px var(--accent-solid)',
-        }}/>
-      )}
-    </div>
-  );
-}
-
-function Corner({ pos }: { pos: 'tl' | 'tr' | 'bl' | 'br' }) {
-  const len = 26, thickness = 3, off = -1;
-  const base: React.CSSProperties = { position: 'absolute', width: len, height: len, borderColor: 'white', borderStyle: 'solid', borderRadius: 4 };
+function ScanCorner({ pos, active }: { pos: 'tl' | 'tr' | 'bl' | 'br'; active: boolean }) {
+  const len = 30, thickness = 3, off = -1;
+  const color = active ? '#22c55e' : 'white';
+  const base: React.CSSProperties = {
+    position: 'absolute', width: len, height: len,
+    borderColor: color, borderStyle: 'solid', borderRadius: 5,
+    transition: 'border-color 0.2s',
+  };
   const styles: Record<string, React.CSSProperties> = {
-    tl: { ...base, top: off, left: off,    borderWidth: `${thickness}px 0 0 ${thickness}px` },
-    tr: { ...base, top: off, right: off,   borderWidth: `${thickness}px ${thickness}px 0 0` },
+    tl: { ...base, top: off, left: off,     borderWidth: `${thickness}px 0 0 ${thickness}px` },
+    tr: { ...base, top: off, right: off,    borderWidth: `${thickness}px ${thickness}px 0 0` },
     bl: { ...base, bottom: off, left: off,  borderWidth: `0 0 ${thickness}px ${thickness}px` },
     br: { ...base, bottom: off, right: off, borderWidth: `0 ${thickness}px ${thickness}px 0` },
   };
   return <div style={styles[pos]}/>;
 }
-
-
