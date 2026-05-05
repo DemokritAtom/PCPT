@@ -1,6 +1,6 @@
 // PWA Dashboard screen — matches the UIUX design exactly
 
-import { useState, useMemo, useRef, useCallback } from 'react';
+import { useState, useMemo, useRef, useCallback, useEffect } from 'react';
 import { Icons } from './icons';
 import { Pill, PwaCard, Sparkline, CardThumb, TopBar, SectionLabel } from './ui';
 import { fmtMoney, fmtMoneySigned, fmtPct, type PwaRow } from './utils';
@@ -11,13 +11,14 @@ interface DashboardProps {
   currency: string;
   t: TranslationFn;
   lastSynced?: Date | null;
+  isSyncing?: boolean;
   onRowClick: (row: PwaRow) => void;
   onTotalClick: () => void;
 }
 
-function fmtAgo(date: Date | null | undefined): string {
-  if (!date) return 'nie';
-  const diffMs = Date.now() - date.getTime();
+function fmtAgo(date: Date | null | undefined, now: number): string {
+  if (!date) return 'gerade eben';
+  const diffMs = now - date.getTime();
   const mins = Math.floor(diffMs / 60_000);
   if (mins < 1) return 'gerade eben';
   if (mins < 60) return `vor ${mins} Min`;
@@ -26,8 +27,14 @@ function fmtAgo(date: Date | null | undefined): string {
   return `vor ${Math.floor(hours / 24)} Tagen`;
 }
 
-export function PwaDashboard({ rows, currency, t, lastSynced, onRowClick, onTotalClick }: DashboardProps) {
+export function PwaDashboard({ rows, currency, t, lastSynced, isSyncing, onRowClick, onTotalClick }: DashboardProps) {
   const [scrolled, setScrolled] = useState(false);
+  // Tick every 30 s so fmtAgo stays accurate without a full refresh
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   const total        = rows.reduce((s, r) => s + r.value, 0);
   const totalCost    = rows.reduce((s, r) => s + r.cost, 0);
@@ -99,9 +106,12 @@ export function PwaDashboard({ rows, currency, t, lastSynced, onRowClick, onTota
         <PwaCard padding={14}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <ActivityRow
-              icon={<Icons.TrendingUp size={14}/>} tone="up"
-              text="Preise aktualisiert"
-              time={fmtAgo(lastSynced)}
+              icon={isSyncing
+                ? <span style={{ display: 'inline-block', animation: 'spin 1s linear infinite', lineHeight: 1 }}>↻</span>
+                : <Icons.TrendingUp size={14}/>}
+              tone="up"
+              text={isSyncing ? 'Preise werden aktualisiert…' : 'Preise aktualisiert'}
+              time={isSyncing ? '' : fmtAgo(lastSynced, now)}
             />
             <ActivityRow
               icon={<Icons.Spark size={14}/>} tone="accent"

@@ -15,6 +15,7 @@ interface PortfolioData {
   setUserCards: (cards: UserCard[]) => void;
   latestPrices: PriceSnapshot | null;
   loading: boolean;
+  isSyncing: boolean;
   error: string | null;
   lastSynced: Date | null;
 }
@@ -24,6 +25,7 @@ export function usePortfolioData(): PortfolioData {
   const [userCards, setUserCardsState] = useState<UserCard[]>([]);
   const [latestPrices, setLatestPrices] = useState<PriceSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
 
@@ -60,6 +62,7 @@ export function usePortfolioData(): PortfolioData {
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load data');
       } finally {
+        setLastSynced(prev => prev ?? new Date());
         setLoading(false);
       }
     }
@@ -71,17 +74,20 @@ export function usePortfolioData(): PortfolioData {
   const refreshPrices = useCallback(async () => {
     const ids = [...new Set(userCardsRef.current.map((uc) => uc.cardId))];
     if (ids.length === 0) return;
+    setIsSyncing(true);
     evictFromCache(ids);
     try {
       const fresh = await fetchCardsByIds(ids);
       setCards(fresh);
       setLastSynced(new Date());
-    } catch { /* silently ignore – stale data stays */ }
+    } catch { /* silently ignore – stale data stays */ } finally {
+      setIsSyncing(false);
+    }
   }, []);
 
   useEffect(() => {
-    // Refresh every 30 minutes
-    const interval = setInterval(() => { void refreshPrices(); }, 30 * 60 * 1000);
+    // Refresh every 5 minutes
+    const interval = setInterval(() => { void refreshPrices(); }, 5 * 60 * 1000);
     // Refresh when tab / PWA becomes visible again
     const onVisible = () => { if (document.visibilityState === 'visible') void refreshPrices(); };
     document.addEventListener('visibilitychange', onVisible);
@@ -122,6 +128,7 @@ export function usePortfolioData(): PortfolioData {
     setUserCards,
     latestPrices,
     loading,
+    isSyncing,
     error,
     lastSynced,
   };

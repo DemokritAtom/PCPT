@@ -27,7 +27,7 @@ const ACCENT = {
 };
 
 export function PwaApp() {
-  const { rows: rawRows, cards, userCards, loading, setUserCards, lastSynced } = usePortfolioData();
+  const { rows: rawRows, cards, userCards, loading, isSyncing, setUserCards, lastSynced } = usePortfolioData();
   const { t, locale, setLocale } = useI18n();
   const [tab, setTab]             = useState<Tab>('dashboard');
   const [detailRow, setDetailRow] = useState<PwaRow | null>(null);
@@ -177,7 +177,7 @@ export function PwaApp() {
         <div style={{ height: '100%', display: tab === 'dashboard' ? 'block' : 'none' }}>
           <PwaDashboard rows={rows} currency={currency} t={tf} onRowClick={setDetailRow}
             onTotalClick={() => setShowTotalChart(true)}
-            lastSynced={lastSynced}
+            lastSynced={lastSynced} isSyncing={isSyncing}
           />
         </div>
         <div style={{ height: '100%', display: tab === 'portfolio' ? 'block' : 'none' }}>
