@@ -1,16 +1,17 @@
-// PWA Add Card screen — live search + clean form
+// PWA Add Card screen — live API search (all pokemontcg.io cards) + clean form
 
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Icons } from './icons';
 import {
   CardThumb, TopBar, GradientButton, Section, inputStyle,
 } from './ui';
-import { fmtMoney, searchCards, getCardPrice } from './utils';
+import { fmtMoney, getCardPrice } from './utils';
+import { searchCardsApi } from '@/lib/pokemon-api';
 import type { TranslationFn } from './types';
 import type { Card, UserCard, Condition, CardVariant } from '@/lib/types';
 
 interface AddCardProps {
-  cards: Card[];
+  cards?: Card[];  // not used anymore, kept for compat
   currency: string;
   t: TranslationFn;
   prefilledCard?: Card | null;
@@ -33,12 +34,14 @@ const VARIANTS: { k: CardVariant; l: string }[] = [
   { k: 'reverseHolofoil', l: 'Reverse' },
 ];
 
-export function PwaAddCard({ cards, currency, t, prefilledCard, editCard, onSave, onCancel }: AddCardProps) {
-  const [scrolled, setScrolled] = useState(false);
-  const [query, setQuery]       = useState('');
-  const [selected, setSelected] = useState<Card | null>(prefilledCard ?? null);
-  const [showResults, setShowResults] = useState(false);
-  const [loading, setLoading]   = useState(false);
+export function PwaAddCard({ currency, t, prefilledCard, editCard, onSave, onCancel }: AddCardProps) {
+  const [scrolled, setScrolled]     = useState(false);
+  const [query, setQuery]           = useState('');
+  const [selected, setSelected]     = useState<Card | null>(prefilledCard ?? null);
+  const [results, setResults]       = useState<Card[]>([]);
+  const [loading, setLoading]       = useState(false);
+  const [totalCount, setTotalCount] = useState(0);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [form, setForm] = useState({
     quantity:      editCard?.quantity ?? 1,
@@ -49,20 +52,41 @@ export function PwaAddCard({ cards, currency, t, prefilledCard, editCard, onSave
     purchaseDate:  editCard?.purchaseDate ?? new Date().toISOString().slice(0, 10),
   });
 
+  // Live API search with debounce
   useEffect(() => {
-    if (!query.trim() || selected) { setShowResults(false); return; }
+    if (selected) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (!query.trim()) {
+      setResults([]);
+      setTotalCount(0);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
-    setShowResults(true);
-    const id = setTimeout(() => setLoading(false), 300);
-    return () => clearTimeout(id);
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const { cards, totalCount } = await searchCardsApi(query.trim(), 20);
+        // Sort alphabetically by name, then by set name
+        const sorted = [...cards].sort((a, b) =>
+          a.name.localeCompare(b.name, 'de') || a.set.name.localeCompare(b.set.name, 'de')
+        );
+        setResults(sorted);
+        setTotalCount(totalCount);
+      } catch {
+        setResults([]);
+        setTotalCount(0);
+      } finally {
+        setLoading(false);
+      }
+    }, 400);
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query, selected]);
-
-  const results = useMemo(() => searchCards(cards, query), [cards, query]);
 
   function pickCard(c: Card) {
     setSelected(c);
     setQuery('');
-    setShowResults(false);
+    setResults([]);
   }
 
   function handleSave() {
@@ -107,21 +131,28 @@ export function PwaAddCard({ cards, currency, t, prefilledCard, editCard, onSave
                 autoFocus
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder={t('pwa.searchCardPlaceholder')}
+                placeholder="Name, Set, Nummer… z.B. Pikachu, base1-58"
                 style={{ ...inputStyle, paddingLeft: 38, paddingTop: 14, paddingBottom: 14, borderRadius: 14, fontSize: 15 }}
               />
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--fg-muted)', marginTop: 8, paddingLeft: 4 }}>
-              {t('pwa.searchHint')}
+              {loading && (
+                <div style={{
+                  position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)',
+                  width: 16, height: 16, borderRadius: 999,
+                  border: '2px solid var(--accent-soft)',
+                  borderTopColor: 'var(--accent-solid)',
+                  animation: 'spin 0.7s linear infinite',
+                }}/>
+              )}
             </div>
 
-            {showResults && (
+            {/* Results */}
+            {query.trim() && (
               <div style={{
-                marginTop: 12, borderRadius: 14,
+                marginTop: 10, borderRadius: 14,
                 background: 'var(--card-bg)', border: '1px solid var(--card-border)',
                 overflow: 'hidden',
               }}>
-                {loading ? (
+                {loading && results.length === 0 ? (
                   [0, 1, 2].map(i => (
                     <div key={i} style={{
                       display: 'flex', alignItems: 'center', gap: 12, padding: 12,
@@ -139,32 +170,40 @@ export function PwaAddCard({ cards, currency, t, prefilledCard, editCard, onSave
                     {t('pwa.noResults')}
                   </div>
                 ) : (
-                  results.map((c, i) => {
-                    const price = getCardPrice(c);
-                    return (
-                      <button key={c.id} onClick={() => pickCard(c)} style={{
-                        display: 'flex', alignItems: 'center', gap: 12, padding: 10, width: '100%',
-                        borderBottom: i < results.length - 1 ? '1px solid var(--card-border)' : 'none',
-                        background: 'transparent', border: 'none', textAlign: 'left',
-                        cursor: 'pointer', color: 'var(--fg)',
-                      }}>
-                        <CardThumb img={c.images.small} name={c.name} w={36} radius={5}/>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 14, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            {c.name}
+                  <>
+                    {totalCount > results.length && (
+                      <div style={{ fontSize: 11, color: 'var(--fg-muted)', padding: '8px 14px 4px', textAlign: 'center' }}>
+                        Top {results.length} von {totalCount.toLocaleString('de')} Treffern · Suche verfeinern für mehr
+                      </div>
+                    )}
+                    {results.map((c, i) => {
+                      const price = getCardPrice(c);
+                      return (
+                        <button key={c.id} onClick={() => pickCard(c)} style={{
+                          display: 'flex', alignItems: 'center', gap: 12, padding: 10, width: '100%',
+                          borderBottom: i < results.length - 1 ? '1px solid var(--card-border)' : 'none',
+                          background: 'transparent', border: 'none', textAlign: 'left',
+                          cursor: 'pointer', color: 'var(--fg)',
+                        }}>
+                          <CardThumb img={c.images.small} name={c.name} w={36} radius={5}/>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 14, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {c.name}
+                            </div>
+                            <div style={{ fontSize: 11, color: 'var(--fg-muted)', marginTop: 2 }}>
+                              {c.set.name} · {c.set.ptcgoCode ?? c.set.id} #{c.number}
+                              {c.rarity ? ` · ${c.rarity}` : ''}
+                            </div>
                           </div>
-                          <div style={{ fontSize: 11, color: 'var(--fg-muted)', marginTop: 2 }}>
-                            {c.set.name} · {c.set.ptcgoCode ?? c.set.id} {c.number}
-                          </div>
-                        </div>
-                        {price !== null && (
-                          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent-solid)' }}>
-                            {fmtMoney(price, currency)}
-                          </div>
-                        )}
-                      </button>
-                    );
-                  })
+                          {price !== null && (
+                            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent-solid)', flexShrink: 0 }}>
+                              {fmtMoney(price, currency)}
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </>
                 )}
               </div>
             )}

@@ -108,6 +108,10 @@ button, a {
   animation: scan 1.4s ease-in-out infinite;
 }
 
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 @keyframes skel {
   0%   { background-position: 200% 0; }
   100% { background-position: -200% 0; }

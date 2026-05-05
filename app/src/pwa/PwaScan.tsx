@@ -42,20 +42,56 @@ export function PwaScan({ cards, currency, t, onCardDetected, onManual }: ScanPr
   async function enableCamera() {
     setError(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false,
-      });
+      // In iOS PWA standalone mode, getUserMedia may not be on navigator.mediaDevices
+      // if the page was not loaded over HTTPS or there's a permissions issue.
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setError('Kamera wird auf diesem Gerät/Browser nicht unterstützt.');
+        return;
+      }
+
+      // Try progressively simpler constraints – iOS PWA can be picky
+      const constraintSets: MediaStreamConstraints[] = [
+        { video: { facingMode: { exact: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+        { video: { facingMode: 'environment' }, audio: false },
+        { video: { facingMode: 'user' }, audio: false },
+        { video: true, audio: false },
+      ];
+
+      let stream: MediaStream | null = null;
+      let lastErr: unknown = null;
+      for (const constraints of constraintSets) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+          break;
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+
+      if (!stream) {
+        const msg = lastErr instanceof DOMException && lastErr.name === 'NotAllowedError'
+          ? 'Kamerazugriff verweigert. Bitte unter Einstellungen → Safari → Kamera erlauben.'
+          : t('pwa.cameraPermBody');
+        setError(msg);
+        return;
+      }
+
       streamRef.current = stream;
       const video = videoRef.current;
       if (video) {
         video.srcObject = stream;
-        video.play().catch(() => {/* autoPlay handles it */});
+        // iOS needs both attribute and property set
+        video.setAttribute('playsinline', '');
+        video.setAttribute('webkit-playsinline', '');
+        video.muted = true;
+        try { await video.play(); } catch { /* autoPlay attribute handles it */ }
       }
       setPhase('viewfinder');
       startAutoScan();
-    } catch {
-      setError(t('pwa.cameraPermBody'));
+    } catch (e) {
+      setError(e instanceof DOMException && e.name === 'NotAllowedError'
+        ? 'Kamerazugriff verweigert. Bitte unter Einstellungen → Safari → Kamera erlauben.'
+        : t('pwa.cameraPermBody'));
     }
   }
 

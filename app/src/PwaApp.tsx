@@ -9,6 +9,7 @@ import { PwaAddCard } from './pwa/PwaAddCard';
 import { PwaScan } from './pwa/PwaScan';
 import { PwaCardDetail } from './pwa/PwaCardDetail';
 import { PwaSettings } from './pwa/PwaSettings';
+import { PwaInstallBanner } from './pwa/PwaInstallBanner';
 import { toPwaRows, type PwaRow } from './pwa/utils';
 import { usePortfolioData } from '@/hooks/usePortfolioData';
 import { addUserCard, updateUserCard, deleteUserCard, markLaunched } from '@/lib/card-store';
@@ -254,6 +255,9 @@ export function PwaApp() {
           />
         );
       })()}
+
+      {/* iOS install instructions banner */}
+      <PwaInstallBanner/>
     </div>
   );
 }
