@@ -23,13 +23,41 @@ export function PwaScan({ cards, currency, t, onCardDetected, onManual }: ScanPr
   const [error, setError]         = useState<string | null>(null);
   const [scanCount, setScanCount] = useState(0);
 
-  const videoRef    = useRef<HTMLVideoElement>(null);
-  const streamRef   = useRef<MediaStream | null>(null);
-  const canvasRef   = useRef<HTMLCanvasElement>(null);
-  const phaseRef    = useRef<Phase>('permission');
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const videoRef       = useRef<HTMLVideoElement>(null);
+  const streamRef      = useRef<MediaStream | null>(null);
+  const canvasRef      = useRef<HTMLCanvasElement>(null);
+  const phaseRef       = useRef<Phase>('permission');
+  const intervalRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pendingStreamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => { phaseRef.current = phase; }, [phase]);
+
+  // Once the video element enters the DOM (phase -> viewfinder), attach the pending stream
+  useEffect(() => {
+    if (phase !== 'viewfinder') return;
+    const stream = pendingStreamRef.current;
+    const video  = videoRef.current;
+    if (!stream || !video) return;
+    pendingStreamRef.current = null;
+    video.srcObject = stream;
+    video.setAttribute('autoplay', '');
+    video.setAttribute('playsinline', '');
+    video.setAttribute('webkit-playsinline', '');
+    video.playsInline = true;
+    video.muted = true;
+    void (async () => {
+      try {
+        await waitForVideoReady(video);
+        try { await video.play(); } catch { await new Promise(r => setTimeout(r, 120)); await video.play(); }
+        if (video.paused || video.videoWidth === 0) throw new Error('preview unavailable');
+        startAutoScan();
+      } catch {
+        setError(t('pwa.cameraPermBody'));
+        setPhase('permission');
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase]);
 
   const waitForVideoReady = useCallback(async (video: HTMLVideoElement) => {
     if (video.readyState >= 2 && video.videoWidth > 0) return;
@@ -104,30 +132,10 @@ export function PwaScan({ cards, currency, t, onCardDetected, onManual }: ScanPr
       }
 
       streamRef.current = stream;
-      const video = videoRef.current;
-      if (video) {
-        video.srcObject = stream;
-        // iOS needs both attribute and property set
-        video.setAttribute('autoplay', '');
-        video.setAttribute('playsinline', '');
-        video.setAttribute('webkit-playsinline', '');
-        video.playsInline = true;
-        video.muted = true;
-        await waitForVideoReady(video);
-        try {
-          await video.play();
-        } catch {
-          // Safari in standalone sometimes needs a short retry.
-          await new Promise((r) => setTimeout(r, 120));
-          await video.play();
-        }
-
-        if (video.paused || video.videoWidth === 0) {
-          throw new Error('camera preview unavailable');
-        }
-      }
+      // Store stream; the useEffect below will attach it once the video element is in DOM
+      pendingStreamRef.current = stream;
       setPhase('viewfinder');
-      startAutoScan();
+      // startAutoScan() is called from the phase-change useEffect after stream is attached
     } catch (e) {
       setError(e instanceof DOMException && e.name === 'NotAllowedError'
         ? 'Kamerazugriff verweigert. Bitte unter Einstellungen → Safari → Kamera erlauben.'
@@ -292,7 +300,7 @@ export function PwaScan({ cards, currency, t, onCardDetected, onManual }: ScanPr
             background: isScanning ? 'var(--accent-solid)' : '#22c55e',
             boxShadow: isScanning ? '0 0 8px var(--accent-solid)' : '0 0 6px #22c55e',
           }} className={isScanning ? 'pulse-dot' : ''}/>
-          {isScanning ? 'Erkenne Karteâ€¦' : 'Karte im Rahmen halten'}
+          {isScanning ? 'Erkenne Karte...' : 'Karte im Rahmen halten'}
         </div>
       </div>
 
