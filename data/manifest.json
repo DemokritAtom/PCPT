@@ -4,11 +4,17 @@
   "description": "Pokémon Sammelkarten-Portfolio: Werte verfolgen, Karten scannen",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#0f172a",
-  "theme_color": "#3b82f6",
+  "background_color": "#0B0816",
+  "theme_color": "#1A6BFF",
   "orientation": "portrait-primary",
   "categories": ["entertainment", "finance"],
   "icons": [
+    {
+      "src": "apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
     {
       "src": "icons/icon-192.png",
       "sizes": "192x192",
@@ -22,6 +28,20 @@
       "purpose": "any maskable"
     }
   ],
+  "screenshots": [],
+  "shortcuts": [
+    {
+      "name": "Portfolio",
+      "url": "./#portfolio",
+      "description": "Deine Kartensammlung"
+    },
+    {
+      "name": "Scan",
+      "url": "./#scan",
+      "description": "Karte scannen"
+    }
+  ]
+}
   "screenshots": [],
   "shortcuts": [
     {
