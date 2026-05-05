@@ -31,6 +31,12 @@ function cacheCards(cards: Card[]): void {
   persistCache();
 }
 
+/** Remove specific IDs from cache so next fetch retrieves fresh data. */
+export function evictFromCache(ids: string[]): void {
+  for (const id of ids) memoryCache.delete(id);
+  persistCache();
+}
+
 export function getCachedCard(id: string): Card | undefined {
   loadCacheFromStorage();
   return memoryCache.get(id);

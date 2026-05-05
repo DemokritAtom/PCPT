@@ -5,7 +5,7 @@ import {
   loadLatestPrices,
 } from '@/lib/data-loader';
 import { loadUserCardsLocal, saveUserCardsLocal, isFirstLaunch, seedDemoPortfolio } from '@/lib/card-store';
-import { fetchCardsByIds } from '@/lib/pokemon-api';
+import { fetchCardsByIds, evictFromCache } from '@/lib/pokemon-api';
 import { buildPortfolioRows } from '@/lib/price-utils';
 
 interface PortfolioData {
@@ -16,7 +16,7 @@ interface PortfolioData {
   latestPrices: PriceSnapshot | null;
   loading: boolean;
   error: string | null;
-  lastSynced: string | null;
+  lastSynced: Date | null;
 }
 
 export function usePortfolioData(): PortfolioData {
@@ -25,10 +25,13 @@ export function usePortfolioData(): PortfolioData {
   const [latestPrices, setLatestPrices] = useState<PriceSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [lastSynced, setLastSynced] = useState<Date | null>(null);
 
-  // Keep a ref so setUserCards closure always sees latest cards
+  // Keep refs so callbacks always see latest values
   const cardsRef = useRef<Card[]>([]);
   cardsRef.current = cards;
+  const userCardsRef = useRef<UserCard[]>([]);
+  userCardsRef.current = userCards;
 
   useEffect(() => {
     async function load() {
@@ -53,6 +56,7 @@ export function usePortfolioData(): PortfolioData {
           const cardsData = await fetchCardsByIds(uniqueCardIds);
           setCards(cardsData);
         }
+        setLastSynced(new Date());
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load data');
       } finally {
@@ -62,6 +66,30 @@ export function usePortfolioData(): PortfolioData {
 
     void load();
   }, []);
+
+  // ── Periodic price refresh ──────────────────────────────────────────────────
+  const refreshPrices = useCallback(async () => {
+    const ids = [...new Set(userCardsRef.current.map((uc) => uc.cardId))];
+    if (ids.length === 0) return;
+    evictFromCache(ids);
+    try {
+      const fresh = await fetchCardsByIds(ids);
+      setCards(fresh);
+      setLastSynced(new Date());
+    } catch { /* silently ignore – stale data stays */ }
+  }, []);
+
+  useEffect(() => {
+    // Refresh every 30 minutes
+    const interval = setInterval(() => { void refreshPrices(); }, 30 * 60 * 1000);
+    // Refresh when tab / PWA becomes visible again
+    const onVisible = () => { if (document.visibilityState === 'visible') void refreshPrices(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [refreshPrices]);
 
   /**
    * Public setter — persists to localStorage and fetches API metadata
@@ -95,6 +123,6 @@ export function usePortfolioData(): PortfolioData {
     latestPrices,
     loading,
     error,
-    lastSynced: latestPrices?.syncedAt ?? null,
+    lastSynced,
   };
 }

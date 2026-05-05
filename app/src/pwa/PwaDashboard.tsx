@@ -10,11 +10,23 @@ interface DashboardProps {
   rows: PwaRow[];
   currency: string;
   t: TranslationFn;
+  lastSynced?: Date | null;
   onRowClick: (row: PwaRow) => void;
   onTotalClick: () => void;
 }
 
-export function PwaDashboard({ rows, currency, t, onRowClick, onTotalClick }: DashboardProps) {
+function fmtAgo(date: Date | null | undefined): string {
+  if (!date) return 'nie';
+  const diffMs = Date.now() - date.getTime();
+  const mins = Math.floor(diffMs / 60_000);
+  if (mins < 1) return 'gerade eben';
+  if (mins < 60) return `vor ${mins} Min`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `vor ${hours} Std`;
+  return `vor ${Math.floor(hours / 24)} Tagen`;
+}
+
+export function PwaDashboard({ rows, currency, t, lastSynced, onRowClick, onTotalClick }: DashboardProps) {
   const [scrolled, setScrolled] = useState(false);
 
   const total        = rows.reduce((s, r) => s + r.value, 0);
@@ -88,8 +100,8 @@ export function PwaDashboard({ rows, currency, t, onRowClick, onTotalClick }: Da
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <ActivityRow
               icon={<Icons.TrendingUp size={14}/>} tone="up"
-              text="Daily price sync completed"
-              time="6h ago"
+              text="Preise aktualisiert"
+              time={fmtAgo(lastSynced)}
             />
             <ActivityRow
               icon={<Icons.Spark size={14}/>} tone="accent"
