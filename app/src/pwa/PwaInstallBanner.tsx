@@ -6,7 +6,11 @@ import { Icons } from './icons';
 const DISMISSED_KEY = 'pwa-install-banner-dismissed';
 
 function isIOS(): boolean {
-  return /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as unknown as { MSStream?: unknown }).MSStream;
+  const ua = navigator.userAgent;
+  const iOSDevice = /iPad|iPhone|iPod/.test(ua);
+  // iPadOS 13+ often reports itself as Mac, but with touch points.
+  const iPadOSDesktopUA = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+  return (iOSDevice || iPadOSDesktopUA) && !(window as unknown as { MSStream?: unknown }).MSStream;
 }
 
 function isStandalone(): boolean {

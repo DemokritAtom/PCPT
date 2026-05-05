@@ -4,6 +4,7 @@ import { CardTable } from '@/components/CardTable';
 import { Dashboard } from '@/components/Dashboard';
 import { CardForm } from '@/components/CardForm';
 import { CardDetail } from '@/components/CardDetail';
+import { PwaInstallBanner } from '@/pwa/PwaInstallBanner';
 import { formatCurrency, totalPortfolioValue } from '@/lib/price-utils';
 import { addUserCard, updateUserCard, deleteUserCard } from '@/lib/card-store';
 import { useI18n } from '@/lib/i18n';
@@ -284,6 +285,8 @@ export function App() {
           {t('footer')}
         </div>
       </footer>
+
+      <PwaInstallBanner />
     </div>
   );
 }

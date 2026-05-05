@@ -31,6 +31,33 @@ export function PwaScan({ cards, currency, t, onCardDetected, onManual }: ScanPr
 
   useEffect(() => { phaseRef.current = phase; }, [phase]);
 
+  const waitForVideoReady = useCallback(async (video: HTMLVideoElement) => {
+    if (video.readyState >= 2 && video.videoWidth > 0) return;
+    await new Promise<void>((resolve, reject) => {
+      const onLoaded = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = () => {
+        cleanup();
+        reject(new Error('video metadata failed'));
+      };
+      const timeout = window.setTimeout(() => {
+        cleanup();
+        reject(new Error('video metadata timeout'));
+      }, 3500);
+
+      const cleanup = () => {
+        window.clearTimeout(timeout);
+        video.removeEventListener('loadedmetadata', onLoaded);
+        video.removeEventListener('error', onError);
+      };
+
+      video.addEventListener('loadedmetadata', onLoaded, { once: true });
+      video.addEventListener('error', onError, { once: true });
+    });
+  }, []);
+
   const stopCamera = useCallback(() => {
     if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
     streamRef.current?.getTracks().forEach(tr => tr.stop());
@@ -81,10 +108,23 @@ export function PwaScan({ cards, currency, t, onCardDetected, onManual }: ScanPr
       if (video) {
         video.srcObject = stream;
         // iOS needs both attribute and property set
+        video.setAttribute('autoplay', '');
         video.setAttribute('playsinline', '');
         video.setAttribute('webkit-playsinline', '');
+        video.playsInline = true;
         video.muted = true;
-        try { await video.play(); } catch { /* autoPlay attribute handles it */ }
+        await waitForVideoReady(video);
+        try {
+          await video.play();
+        } catch {
+          // Safari in standalone sometimes needs a short retry.
+          await new Promise((r) => setTimeout(r, 120));
+          await video.play();
+        }
+
+        if (video.paused || video.videoWidth === 0) {
+          throw new Error('camera preview unavailable');
+        }
       }
       setPhase('viewfinder');
       startAutoScan();
