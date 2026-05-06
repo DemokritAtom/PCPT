@@ -35,6 +35,40 @@ export interface PwaRow {
 }
 
 /**
+ * Expands a sparse date/price history into a daily array with linear
+ * interpolation for any gaps (e.g. if GitHub Actions missed a day).
+ * Caps output at 365 data points so the chart stays responsive.
+ */
+function interpolateHistory(dates: string[], prices: number[]): number[] {
+  if (dates.length < 2) return [...prices];
+  const DAY = 86_400_000;
+  const t0  = new Date(dates[0]!).getTime();
+  const t1  = new Date(dates[dates.length - 1]!).getTime();
+  const totalDays = Math.min(Math.round((t1 - t0) / DAY) + 1, 365);
+  const result: number[] = new Array(totalDays).fill(0);
+
+  // Place known points
+  for (let i = 0; i < dates.length; i++) {
+    const day = Math.min(Math.round((new Date(dates[i]!).getTime() - t0) / DAY), totalDays - 1);
+    result[day] = prices[i]!;
+  }
+
+  // Fill gaps between known points
+  for (let i = 0; i < dates.length - 1; i++) {
+    const dayA = Math.min(Math.round((new Date(dates[i]!).getTime() - t0) / DAY), totalDays - 1);
+    const dayB = Math.min(Math.round((new Date(dates[i + 1]!).getTime() - t0) / DAY), totalDays - 1);
+    const pA = prices[i]!;
+    const pB = prices[i + 1]!;
+    for (let d = dayA + 1; d < dayB; d++) {
+      const t = (d - dayA) / (dayB - dayA);
+      result[d] = pA + (pB - pA) * t;
+    }
+  }
+
+  return result;
+}
+
+/**
  * Builds a price history array for the sparkline graph.
  * Uses real recorded trendPrice data when available; falls back to
  * a synthetic 90-point estimate built from avg30/avg7/current.
@@ -46,7 +80,7 @@ function buildHistoryArray(
   avg30: number | null,
 ): number[] {
   if (entry && entry.p.length >= 2) {
-    return [...entry.p]; // real historical data — no fabrication
+    return interpolateHistory(entry.d, entry.p); // real data, gaps filled
   }
   return generateHistory(current, avg7, avg30);
 }

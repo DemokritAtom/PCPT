@@ -3,7 +3,7 @@
 
 import { useState, useRef, useCallback } from 'react';
 import { Icons } from './icons';
-import { Pill, Sparkline, CardThumb, GhostButton } from './ui';
+import { Pill, Sparkline, CardThumb, GhostButton, inputStyle } from './ui';
 import { fmtMoney, fmtMoneySigned, fmtPct, typeToPillTone, type PwaRow } from './utils';
 import type { TranslationFn } from './types';
 
@@ -12,6 +12,8 @@ interface CardDetailProps {
   initialIndex: number;  // which row to show first
   currency: string;
   t: TranslationFn;
+  priceTargets: Record<string, number>;  // ucId → target EUR price
+  onSetTarget: (ucId: string, target: number | null) => void;
   onClose: () => void;
   onEdit: (row: PwaRow) => void;
   onDelete: (id: string) => void;
@@ -21,7 +23,7 @@ type Range = '7d' | '30d' | '90d';
 const RANGES: Range[] = ['7d', '30d', '90d'];
 const RANGE_DAYS: Record<Range, number> = { '7d': 7, '30d': 30, '90d': 30 };
 
-export function PwaCardDetail({ rows, initialIndex, currency, t, onClose, onEdit, onDelete }: CardDetailProps) {
+export function PwaCardDetail({ rows, initialIndex, currency, t, priceTargets, onSetTarget, onClose, onEdit, onDelete }: CardDetailProps) {
   const [idx, setIdx]     = useState(initialIndex);
   const [range, setRange] = useState<Range>('30d');
   const touchStart  = useRef<{ x: number; y: number } | null>(null);
@@ -232,6 +234,15 @@ export function PwaCardDetail({ rows, initialIndex, currency, t, onClose, onEdit
               }
             />
           </div>
+
+          {/* Kursziel */}
+          <PriceTargetSection
+            ucId={row.uc.id}
+            currentPrice={row.price.trend}
+            target={priceTargets[row.uc.id] ?? null}
+            currency={currency}
+            onSetTarget={onSetTarget}
+          />
         </div>
 
         {/* Bottom action bar */}
@@ -284,6 +295,107 @@ function DetailRow({ label, value, last }: { label: string; value: React.ReactNo
     }}>
       <span style={{ color: 'var(--fg-muted)' }}>{label}</span>
       <span style={{ color: 'var(--fg)', fontWeight: 600 }}>{value}</span>
+    </div>
+  );
+}
+
+// ── Kursziel ──────────────────────────────────────────────────────────────────
+
+function PriceTargetSection({
+  ucId, currentPrice, target, currency, onSetTarget,
+}: {
+  ucId: string;
+  currentPrice: number;
+  target: number | null;
+  currency: string;
+  onSetTarget: (ucId: string, t: number | null) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [raw, setRaw]         = useState('');
+
+  function startEdit() {
+    setRaw(target !== null ? String(target) : '');
+    setEditing(true);
+  }
+
+  function confirm() {
+    const v = parseFloat(raw.replace(',', '.'));
+    if (!isNaN(v) && v > 0) {
+      onSetTarget(ucId, v);
+    } else if (raw.trim() === '') {
+      onSetTarget(ucId, null);
+    }
+    setEditing(false);
+  }
+
+  const reached  = target !== null && currentPrice >= target;
+  const progress = target !== null && target > 0
+    ? Math.min((currentPrice / target) * 100, 100)
+    : 0;
+  const barColor = reached ? 'var(--up)' : 'var(--accent-solid)';
+
+  return (
+    <div style={{
+      marginTop: 12, padding: 14, borderRadius: 14,
+      background: 'var(--card-bg)', border: '1px solid var(--card-border)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.4, textTransform: 'uppercase', color: 'var(--fg-muted)' }}>
+          Kursziel
+        </div>
+        {reached && (
+          <span style={{
+            fontSize: 11, fontWeight: 700, color: 'var(--up)',
+            background: 'rgba(52,211,153,0.15)', padding: '2px 8px', borderRadius: 999,
+          }}>✓ Erreicht!</span>
+        )}
+        <button onClick={startEdit} style={{
+          background: 'none', border: 'none', cursor: 'pointer',
+          color: 'var(--fg-muted)', padding: '2px 4px', fontSize: 12,
+        }}>
+          {target !== null ? 'Ändern' : '+ Setzen'}
+        </button>
+      </div>
+
+      {editing ? (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input
+            autoFocus
+            value={raw}
+            onChange={e => setRaw(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') confirm(); if (e.key === 'Escape') setEditing(false); }}
+            placeholder="Zielpreis in € (leer = löschen)"
+            style={{ ...inputStyle, flex: 1, padding: '10px 12px', borderRadius: 10, fontSize: 14 }}
+          />
+          <button onClick={confirm} style={{
+            background: 'var(--accent-solid)', color: 'white', border: 'none',
+            borderRadius: 10, padding: '10px 14px', cursor: 'pointer', fontWeight: 700, fontSize: 13,
+          }}>OK</button>
+        </div>
+      ) : target !== null ? (
+        <>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 8 }}>
+            <span style={{ color: 'var(--fg-muted)' }}>Aktuell {fmtMoney(currentPrice, currency)}</span>
+            <span style={{ color: barColor, fontWeight: 700 }}>Ziel {fmtMoney(target, currency)}</span>
+          </div>
+          {/* Progress bar */}
+          <div style={{ height: 6, borderRadius: 999, background: 'var(--card-border)', overflow: 'hidden' }}>
+            <div style={{
+              height: '100%', borderRadius: 999,
+              width: `${progress}%`,
+              background: barColor,
+              transition: 'width 0.4s ease',
+            }}/>
+          </div>
+          <div style={{ textAlign: 'right', fontSize: 11, color: 'var(--fg-muted)', marginTop: 4 }}>
+            {progress.toFixed(0)}% vom Ziel
+          </div>
+        </>
+      ) : (
+        <div style={{ fontSize: 13, color: 'var(--fg-muted)', textAlign: 'center', padding: '8px 0' }}>
+          Kein Kursziel gesetzt
+        </div>
+      )}
     </div>
   );
 }

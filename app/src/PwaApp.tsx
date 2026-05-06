@@ -37,6 +37,19 @@ export function PwaApp() {
   const [activeCurrency, setActiveCurrency] = useState<string>(() => localStorage.getItem('pwa-currency') ?? 'EUR');
   const [profileName, setProfileName] = useState<string>(() => localStorage.getItem('pwa-profile-name') ?? '');
   const [showTotalChart, setShowTotalChart] = useState(false);
+  const [priceTargets, setPriceTargets] = useState<Record<string, number>>(() => {
+    try { return JSON.parse(localStorage.getItem('pwa-price-targets') ?? '{}') as Record<string, number>; }
+    catch { return {}; }
+  });
+
+  function handleSetTarget(ucId: string, target: number | null) {
+    setPriceTargets(prev => {
+      const next = { ...prev };
+      if (target === null) delete next[ucId]; else next[ucId] = target;
+      localStorage.setItem('pwa-price-targets', JSON.stringify(next));
+      return next;
+    });
+  }
 
   const rows    = toPwaRows(rawRows, priceHistory?.history);
   const currency = activeCurrency;
@@ -250,6 +263,8 @@ export function PwaApp() {
         return (
           <PwaCardDetail
             rows={rows} initialIndex={idx} currency={currency} t={tf}
+            priceTargets={priceTargets}
+            onSetTarget={handleSetTarget}
             onClose={() => setDetailRow(null)}
             onEdit={handleEdit}
             onDelete={(id) => handleDelete(id)}

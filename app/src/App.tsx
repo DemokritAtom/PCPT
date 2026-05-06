@@ -281,6 +281,19 @@ export function App() {
   const [isDesktop, setIsDesktop]   = useState(() => window.innerWidth >= 900);
   const [activeCurrency, setActiveCurrency] = useState(() => localStorage.getItem('pwa-currency') ?? 'EUR');
   const [profileName, setProfileName] = useState(() => localStorage.getItem('pwa-profile-name') ?? 'Christoph');
+  const [priceTargets, setPriceTargets] = useState<Record<string, number>>(() => {
+    try { return JSON.parse(localStorage.getItem('pwa-price-targets') ?? '{}') as Record<string, number>; }
+    catch { return {}; }
+  });
+
+  function handleSetTarget(ucId: string, target: number | null) {
+    setPriceTargets(prev => {
+      const next = { ...prev };
+      if (target === null) delete next[ucId]; else next[ucId] = target;
+      localStorage.setItem('pwa-price-targets', JSON.stringify(next));
+      return next;
+    });
+  }
 
   const rows = toPwaRows(rawRows, priceHistory?.history);
 
@@ -404,6 +417,8 @@ export function App() {
           rows={rows}
           initialIndex={detailIdx}
           currency={activeCurrency} t={t as TranslationFn}
+          priceTargets={priceTargets}
+          onSetTarget={handleSetTarget}
           onClose={() => setDetailRow(null)}
           onEdit={(row) => {
             setEditCard(row.uc);
