@@ -8,11 +8,15 @@ self.addEventListener('install', (event) => {
 });
 
 self.addEventListener('activate', (event) => {
-  // Delete every cache that doesn't match the current version
+  // Delete every cache that doesn't match the current version, then claim all
+  // open clients. After claiming, notify them so they can reload and pick up
+  // the new build immediately (avoids stale JS on PWA reopen).
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
-    ).then(() => self.clients.claim())
+    caches.keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim())
+      .then(() => self.clients.matchAll({ type: 'window' }))
+      .then((clients) => clients.forEach((c) => c.postMessage({ type: 'SW_ACTIVATED' })))
   );
 });
 

@@ -12,6 +12,13 @@ if ('serviceWorker' in navigator) {
       .register('./sw.js')
       .catch((err) => console.warn('SW registration failed:', err));
   });
+
+  // When a new SW takes control (after skipWaiting + clients.claim),
+  // reload so the page always runs the latest JS/CSS — fixes the
+  // "need to force-reload after reopening PWA" issue.
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    window.location.reload();
+  });
 }
 
 const rootEl = document.getElementById('root');
